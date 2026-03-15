@@ -1,0 +1,115 @@
+service: news-ai
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: eu-north-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 29
+  logRetentionInDays: 14
+
+  environment:
+    STAGE: ${self:provider.stage}
+    PREFERENCES_TABLE: ${self:custom.preferencesTable}
+    NEWS_API_KEY: ${env:NEWS_API_KEY, ssm:/news-ai/${self:provider.stage}/news-api-key}
+
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+          Resource:
+            - !GetAtt PreferencesTable.Arn
+            - !Join ["/", [!GetAtt PreferencesTable.Arn, "index/*"]]
+        - Effect: Allow
+          Action:
+            - bedrock:InvokeModel
+            - bedrock:InvokeModelWithResponseStream
+          Resource:
+            - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+            - "arn:aws:bedrock:${self:provider.region}:*:inference-profile/eu.anthropic.*"
+        - Effect: Allow
+          Action:
+            - aws-marketplace:ViewSubscriptions
+            - aws-marketplace:Subscribe
+          Resource: "*"
+
+custom:
+  preferencesTable: news-ai-preferences-${self:provider.stage}
+  esbuild:
+    bundle: true
+    minify: true
+    sourcemap: true
+    exclude:
+      - '@aws-sdk/*'
+    target: node20
+    platform: node
+    concurrency: 10
+  dotenv:
+    exclude:
+      - AWS_REGION
+      - PREFERENCES_TABLE
+  serverless-offline:
+    httpPort: 3000
+    lambdaPort: 3002
+
+plugins:
+  - serverless-dotenv-plugin
+  - serverless-esbuild
+  - serverless-offline
+
+functions:
+  getNews:
+    handler: src/handlers/getNews.handler
+    description: Fetch and return personalized news for a user
+    events:
+      - http:
+          method: GET
+          path: news
+          cors: true
+          # In production, add a Cognito authorizer here:
+          # authorizer: cognitoAuthorizer
+
+  updatePreferences:
+    handler: src/handlers/updatePreferences.handler
+    description: Create or update user topic preferences
+    events:
+      - http:
+          method: POST
+          path: preferences
+          cors: true
+
+resources:
+  Resources:
+    PreferencesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.preferencesTable}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        SSESpecification:
+          SSEEnabled: true
+
+  Outputs:
+    PreferencesTableName:
+      Value: !Ref PreferencesTable
+      Export:
+        Name: ${self:service}-${self:provider.stage}-preferences-table
+    ApiGatewayRestApiId:
+      Value: !Ref ApiGatewayRestApi
+      Export:
+        Name: ${self:service}-${self:provider.stage}-api-id
